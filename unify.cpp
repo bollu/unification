@@ -1,12 +1,13 @@
+// Dragon book chapter 6, figure 6.18.
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <vector>
 #include <map>
 #include <set>
+#include <vector>
 
 #include "parser.h"
 
@@ -61,7 +62,7 @@ struct SurfaceTypeConstructor : public SurfaceType {
     }
 
     void collectVarNames(std::set<std::string> &vs) const override {
-        for(SurfaceType *arg : args) {
+        for (SurfaceType *arg : args) {
             arg->collectVarNames(vs);
         }
     }
@@ -91,7 +92,7 @@ struct TcTypeFA : public TcType {
     };
 
     void print(ostream &o) const override {
-        o << "(∀ " + getUniqName()  + ". ";
+        o << "(∀ " + getUniqName() + ". ";
         inner->print(o);
         o << ")";
     }
@@ -117,7 +118,9 @@ struct TcTypeConstructor : public TcType {
     void print(ostream &o) const override {
         o << getUniqName();
 
-        if (args.size() == 0) { return; }
+        if (args.size() == 0) {
+            return;
+        }
         o << "<";
         for (int i = 0; i < (int)args.size(); ++i) {
             args[i]->print(o);
@@ -128,38 +131,39 @@ struct TcTypeConstructor : public TcType {
         o << ">";
     }
 
-    std::string getUniqName() const {
-        return name + std::to_string(uuid);
-    }
+    std::string getUniqName() const { return name + std::to_string(uuid); }
 };
 
 int TcType::nuuid_ = 0;
 
 // A node in the type checker graph for unification.
-struct TcUnificationNode {
+struct TcUnifNode {
     bool isleaf() { return children_.size() == 0; }
     bool isvar() { return islower(name_[0]); }
     const int numChildren() { return children_.size(); }
 
-    static TcUnificationNode gensymTypeVar() {
-        TcUnificationNode ty;
+    static TcUnifNode gensymTypeVar() {
+        TcUnifNode ty;
         ty.name_ = "gensym";
         return ty;
     };
 
-    // static TcUnificationNode fresh(TcUnificationNode *t) {
-    // };
+    // replace all `forall x.` with new nodes.
+    static TcUnifNode fresh(TcType *t) {
+    };
 
     const int uuid_;
 
    private:
-    TcUnificationNode() : uuid_(nuuid_ + 1) {}
+    TcUnifNode() : uuid_(nuuid_ + 1) {}
     static int nuuid_;
-    vector<TcUnificationNode *> children_;
+    vector<TcUnifNode *> children_;
     std::string name_;
+
+    static TcUnifNode *goFresh(TcType *t, map<std::string, TcUnifNode *> name2node) {}
 };
 
-int TcUnificationNode::nuuid_ = 0;
+int TcUnifNode::nuuid_ = 0;
 
 // decl fnname(t1, t2, ... tn) -> tout
 struct FnDecl {
@@ -199,6 +203,7 @@ enum class ExprKind { Identifier, Ap };
 struct Expr {
     Span span;
     ExprKind kind;
+    TcUnifNode *type;
     Expr(Span span, ExprKind kind) : span(span), kind(kind){};
     virtual void print(std::ostream &o) const = 0;
 };
@@ -365,8 +370,10 @@ Module parseTopLevel(Parser &p) {
             FnDecl *decl = parseFnDecl(*sp, p);
             auto it = m.decls.find(decl->name.name);
             if (it != m.decls.end()) {
-                cerr << "\n===ERROR: multiple declaration of name |" << decl->name.name << "|==\n";
-                p.addNote(ParseError(it->second->span, "original 1st declaration"));
+                cerr << "\n===ERROR: multiple declaration of name |"
+                     << decl->name.name << "|==\n";
+                p.addNote(
+                    ParseError(it->second->span, "original 1st declaration"));
                 p.addErr(ParseError(decl->span, "illegal 2nd declaration"));
             } else {
                 m.decls[decl->name.name] = decl;
@@ -383,16 +390,17 @@ Module parseTopLevel(Parser &p) {
     return m;
 }
 
-
-TcType *surfaceType2TcType(SurfaceType *st, std::map<std::string, TcTypeFA *> &vars) {
+TcType *surfaceType2TcType(SurfaceType *st,
+                           std::map<std::string, TcTypeFA *> &vars) {
     if (SurfaceTypeVar *v = dynamic_cast<SurfaceTypeVar *>(st)) {
         assert(vars.count(v->name.name));
         return new TcTypeVar(vars[v->name.name]);
-    } 
+    }
 
-    if (SurfaceTypeConstructor *c = dynamic_cast<SurfaceTypeConstructor *>(st)) {
+    if (SurfaceTypeConstructor *c =
+            dynamic_cast<SurfaceTypeConstructor *>(st)) {
         std::vector<TcType *> args;
-        for(SurfaceType *arg : c->args) {
+        for (SurfaceType *arg : c->args) {
             args.push_back(surfaceType2TcType(arg, vars));
         }
         return new TcTypeConstructor(c->name.name, args);
@@ -403,17 +411,17 @@ TcType *surfaceType2TcType(SurfaceType *st, std::map<std::string, TcTypeFA *> &v
 
 TcType *generateTypeForDecl(const FnDecl *decl) {
     std::set<std::string> vs;
-    for(SurfaceType *ty : decl->argtys) {
+    for (SurfaceType *ty : decl->argtys) {
         ty->collectVarNames(vs);
     }
     decl->retty->collectVarNames(vs);
     std::map<std::string, TcTypeFA *> var2fa;
-    for(std::string name : vs) {
-        var2fa[name] =  new TcTypeFA(name, nullptr);
+    for (std::string name : vs) {
+        var2fa[name] = new TcTypeFA(name, nullptr);
     }
     // generate type Ap(Prod(t1, t2, ... tn), ret)
     vector<TcType *> prodArgs;
-    for(SurfaceType *ty : decl->argtys) {
+    for (SurfaceType *ty : decl->argtys) {
         prodArgs.push_back(surfaceType2TcType(ty, var2fa));
     }
     TcType *prod = new TcTypeConstructor("Prod", prodArgs);
@@ -421,7 +429,7 @@ TcType *generateTypeForDecl(const FnDecl *decl) {
     TcType *ap = new TcTypeConstructor("Ap", {prod, ret});
 
     TcType *prev = ap;
-    for(auto it : var2fa) {
+    for (auto it : var2fa) {
         it.second->inner = prev;
         prev = it.second;
     }
@@ -430,21 +438,37 @@ TcType *generateTypeForDecl(const FnDecl *decl) {
 };
 
 void generateTypesForDecls(Module &m) {
-    for(auto it : m.decls) {
+    for (auto it : m.decls) {
         it.second->type = generateTypeForDecl(it.second);
     }
 }
 
+void typeInferExpr(Expr *e, Module &m, const char *raw_input) {
+    if (ExprIdent *id = dynamic_cast<ExprIdent *>(e)) {
+        auto it = m.decls.find(id->name.name);
+        if (it == m.decls.end()) {
+            cerr << printfspan(id->span, raw_input,
+                               "ERROR: unable to find idenfier |%s| in module",
+                               id->name.name.c_str());
+            cerr << printfspan(e->span, raw_input,
+                               "ERROR when type checking expression");
+            assert(false && "unknown identifier");
+        }
+        assert(it->second->type && "types must have been computed for declarations before inference");
+        e->type = TcUnifNode::fresh(it->second->type);
+    }
+}
+
 const int BUFSIZE = int(1e9);
-char raw[BUFSIZE];
+char raw_input[BUFSIZE];
 int main(int argc, char *argv[]) {
     assert(argc == 2 && "usage: unify <path-to-file>");
     cout << "opening file: |" << argv[1] << "|\n";
     FILE *f = fopen(argv[1], "r");
     assert(f && "unable to open input file");
-    fread(raw, 1, BUFSIZE, f);
+    fread(raw_input, 1, BUFSIZE, f);
     fclose(f);
-    Parser p(argv[1], raw);
+    Parser p(argv[1], raw_input);
     Module m = parseTopLevel(p);
     cerr << "\n===parsed module===\n";
     m.print(cerr);
@@ -454,6 +478,10 @@ int main(int argc, char *argv[]) {
     cerr << "\n===module w/ typed decls===\n";
     m.print(cerr);
     cerr << "\n";
+
+    for (Expr *e : m.es) {
+        typeInferExpr(e, m, raw_input);
+    }
 
     return 0;
 }
