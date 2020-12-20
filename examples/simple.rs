@@ -8,5 +8,4 @@ decl deref(Pointer<a>) -> a;
 
 lengthList(emptyString());
 deref(deref(ptr()));
-
-
+lengthList;

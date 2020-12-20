@@ -54,13 +54,12 @@ struct SurfaceTypeConstructor : public SurfaceType {
           args(args){};
 
     void print(std::ostream &o) const override {
-        o << name.name;
-        if (!args.size()) return;
         o << "<";
+        o << name.name << " ";
         for (int i = 0; i < (int)args.size(); ++i) {
             args[i]->print(o);
             if (i + 1 < (int)args.size()) {
-                o << ", ";
+                o << " ";
             }
         }
         o << ">";
@@ -122,22 +121,14 @@ struct TcTypeConstructor : public TcType {
     }
 
     void print(ostream &o) const override {
-        o << getUniqName();
-
-        if (args.size() == 0) {
-            return;
-        }
         o << "<";
+        o << name;
+
         for (int i = 0; i < (int)args.size(); ++i) {
-            args[i]->print(o);
-            if (i + 1 < (int)args.size()) {
-                o << ", ";
-            }
+            o << " "; args[i]->print(o);
         }
         o << ">";
     }
-
-    std::string getUniqName() const { return name + std::to_string(uuid); }
 };
 
 int TcType::nuuid_ = 0;
@@ -173,7 +164,6 @@ struct UnifNode {
 struct UnifNodeVar : public UnifNode {
     UnifNodeVar() : UnifNode(UnifNodeKind::Var) {}
     void print(ostream &o, int indent) const override {
-
         if (this == repr()) {
             o << "[α" << getPronouncableNum(uuid) << "]";
         } else {
@@ -192,7 +182,6 @@ struct UnifNodeConstructor : public UnifNode {
         if (this == repr()) {
             o << "[" << name;
             for (UnifNode *u : children) {
-                // o << "\n";
                 o << " ";
                 u->repr()->print(o, indent + 1);
             }
@@ -239,7 +228,7 @@ UnifNode *freshGo_(TcType *ty, map<TcTypeFA *, UnifNodeVar *> m) {
 };
 
 // unite the nodes `l` and `r` with `l` as the representative.
-void unify(UnifNode *l, UnifNode *r, int indent=0) {
+void unify(UnifNode *l, UnifNode *r, int indent = 0) {
     printIndent(cerr, indent);
     cerr << "\t-{u} ";
     l->print(cerr);
@@ -308,7 +297,7 @@ void unify(UnifNode *l, UnifNode *r, int indent=0) {
     }
 
     for (int i = 0; i < cl->children.size(); ++i) {
-        unify(cl->children[i], cr->children[i], indent+1);
+        unify(cl->children[i], cr->children[i], indent + 1);
     }
     printFinalAnswer("cons");
     return;
@@ -354,15 +343,16 @@ struct Expr {
     ExprKind kind;
     UnifNode *type = nullptr;
     Expr(Span span, ExprKind kind) : span(span), kind(kind){};
-    virtual void print(std::ostream &o) const = 0;
+    virtual void print(std::ostream &o, bool withTypes) const = 0;
 };
 
 struct ExprIdent : public Expr {
     Identifier name;
     ExprIdent(Span span, Identifier name)
         : Expr(span, ExprKind::Identifier), name(name){};
-    void print(std::ostream &o) const override {
-        if (type) {
+    void print(std::ostream &o, bool withTypes) const override {
+        if (withTypes) {
+            assert(type);
             o << name;
             type->repr()->print(o);
         } else {
@@ -377,23 +367,24 @@ struct ExprAp : public Expr {
     ExprAp(Span span, Expr *rator, vector<Expr *> rands)
         : Expr(span, ExprKind::Ap), rator(rator), rands(rands){};
 
-    void print(std::ostream &o) const override {
+    void print(std::ostream &o, bool withTypes) const override {
         if (rator->kind == ExprKind::Identifier) {
-            rator->print(o);
+            rator->print(o, withTypes);
         } else {
             o << "(";
-            rator->print(o);
+            rator->print(o, withTypes);
             o << ")";
         }
         o << "(";
         for (int i = 0; i < (int)rands.size(); ++i) {
-            rands[i]->print(o);
+            rands[i]->print(o, withTypes);
             if (i + 1 < (int)rands.size()) {
                 o << ", ";
             }
         }
         o << ")";
-        if (type) {
+        if (withTypes) {
+            assert(type);
             o << ":";
             type->repr()->print(o);
         }
@@ -413,7 +404,7 @@ struct Module {
         }
 
         for (Expr *e : es) {
-            e->print(o);
+            e->print(o, /*withTypes=*/false);
             o << ";\n";
         }
     }
@@ -482,7 +473,7 @@ FnDecl *parseFnDecl(Span spanBegin, Parser &p) {
 
 // expr := apRator apRands
 // apRator := '(' expr ')' | ident
-// apRands := '(' expr ',' expr ... ',' expr ')'
+// apRands := '(' expr ',' expr ... ',' expr ')' | ε
 Expr *parseExpr(Parser &p);
 Expr *parseApRator(Parser &p);
 vector<Expr *> parseApRands(Parser &p);
@@ -497,28 +488,27 @@ Expr *parseApRator(Parser &p) {
     return new ExprIdent(name.span, name);
 }
 
-vector<Expr *> parseApRands(Parser &p) {
-    Span open = p.parseOpenRoundBracket();
-    if (p.parseOptionalCloseRoundBracket()) {
-        return {};
-    }
-
-    vector<Expr *> rhs;
-    while (1) {
-        rhs.push_back(parseExpr(p));
-        if (p.parseOptionalComma()) {
-            continue;
-        } else {
-            p.parseCloseRoundBracket(open);
-            break;
-        }
-    }
-    return rhs;
-}
 Expr *parseExpr(Parser &p) {
     Loc begin = p.getCurrentLoc();
     Expr *rator = parseApRator(p);
-    vector<Expr *> rands = parseApRands(p);
+
+    optional<Span> open = p.parseOptionalOpenRoundBracket();
+    if (!open) { return rator; }
+
+    vector<Expr *> rands;
+    if (!p.parseOptionalCloseRoundBracket()) {
+
+        while (1) {
+            rands.push_back(parseExpr(p));
+            if (p.parseOptionalComma()) {
+                continue;
+            } else {
+                p.parseCloseRoundBracket(*open);
+                break;
+            }
+        }
+    }
+
     Loc end = p.getCurrentLoc();
     return new ExprAp(Span(begin, end), rator, rands);
 }
@@ -586,7 +576,7 @@ TcType *generateTypeForDecl(const FnDecl *decl) {
     }
     TcType *prod = new TcTypeConstructor("π", prodArgs);
     TcType *ret = surfaceType2TcType(decl->retty, var2fa);
-    TcType *ap = new TcTypeConstructor("»", {prod, ret});
+    TcType *ap = new TcTypeConstructor("→", {prod, ret});
 
     TcType *prev = ap;
     for (auto it : var2fa) {
@@ -618,11 +608,11 @@ void typeInferExpr(Expr *e, Module &m, const char *raw_input) {
             it->second->type &&
             "types must have been computed for declarations before inference");
         cerr << "\t-{0} ";
-        e->print(cerr);
+        e->print(cerr, false);
         cerr << "\n";
         e->type = fresh(it->second->type);
         cerr << "\t-{1} ";
-        e->print(cerr);
+        e->print(cerr, true);
         cerr << "\n";
         return;
     }
@@ -639,17 +629,88 @@ void typeInferExpr(Expr *e, Module &m, const char *raw_input) {
         // t(ap) ~ Ap(Prod(map(t, rands), retty)
         UnifNodeVar *retty = new UnifNodeVar();
         UnifNode *apty = new UnifNodeConstructor(
-            "»", {new UnifNodeConstructor("π", argsty), retty});
+            "→", {new UnifNodeConstructor("π", argsty), retty});
 
         ap->type = retty;
         cerr << "\t-{0} ";
-        e->print(cerr);
+        e->print(cerr, /*withTypes=*/false);
         cerr << "\n";
         unify(apty, ap->rator->type);
         cerr << "\t-{1} ";
-        e->print(cerr);
+        e->print(cerr, /*withTypes=*/true);
         cerr << "\n";
     }
+}
+
+struct RaiseUnificationToTypePass {
+    static TcType *run(UnifNode *node) {
+        node = node->repr();
+        set<UnifNodeVar *> vars;
+        gatherVars(node, vars);
+
+        map<UnifNodeVar *, TcTypeFA *> var2fa;
+        for (UnifNodeVar *v : vars) {
+            var2fa[v] = new TcTypeFA("t", nullptr);
+        }
+        return raise(node, var2fa);
+    };
+    static TcType *raise(UnifNode *node, map<UnifNodeVar *, TcTypeFA *> m) {
+        node = node->repr();
+        if (auto v = dynamic_cast<UnifNodeVar *>(node)) {
+            auto it = m.find(v);
+            assert(it != m.end());
+            return new TcTypeVar(it->second);
+        }
+
+        auto c = dynamic_cast<UnifNodeConstructor *>(node);
+        assert(c);
+        vector<TcType *> adults;
+        for (UnifNode *child : c->children) {
+            adults.push_back(raise(child, m));
+        }
+        return new TcTypeConstructor(c->name, adults);
+    }
+
+    static void gatherVars(UnifNode *node, set<UnifNodeVar *> &vs) {
+        node = node->repr();
+        if (auto v = dynamic_cast<UnifNodeVar *>(node)) {
+            vs.insert(v);
+            return;
+        }
+
+        auto c = dynamic_cast<UnifNodeConstructor *>(node);
+        assert(c);
+        for (UnifNode *child : c->children) {
+            gatherVars(child, vs);
+        }
+    }
+};
+
+// print an expression with the raised types.
+void printExprRaised(Expr *e, int indent = 0) {
+    if (auto ident = dynamic_cast<ExprIdent *>(e)) {
+        TcType *ty = RaiseUnificationToTypePass::run(ident->type);
+        printIndent(cerr, indent);
+        e->print(cerr, /*withTypes=*/false);
+        ty->print(cerr);
+        return;
+    }
+
+    auto ap = dynamic_cast<ExprAp *>(e);
+    cerr << "(@ ";
+    assert(ap);
+    printExprRaised(ap->rator);
+    for (int i = 0; i < (int)ap->rands.size(); ++i) {
+        cerr << "\n";
+        printIndent(cerr, indent + 1);
+        printExprRaised(ap->rands[i], indent + 1);
+    }
+    TcType *ty = RaiseUnificationToTypePass::run(ap->type);
+    cerr << "\n";
+    printIndent(cerr, indent + 1);
+    cerr << ":";
+    ty->print(cerr);
+    cerr << ")";
 }
 
 const int BUFSIZE = int(1e9);
@@ -674,11 +735,12 @@ int main(int argc, char *argv[]) {
 
     for (Expr *e : m.es) {
         cerr << "\n==inferring |";
-        e->print(cerr);
+        e->print(cerr, /*withTypes=*/false);
         cerr << "|==\n";
         typeInferExpr(e, m, raw_input);
-        // cerr << "  after inference:\n";
-        // e->print(cerr);
+        cerr << "\n--type after inference:--\n";
+        printExprRaised(e);
+        cerr << "\n";
     }
 
     return 0;
