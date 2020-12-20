@@ -499,3 +499,28 @@ struct Parser {
         }
     }
 };
+
+
+// utility to print a number as a collection of letters.
+char *getPronouncableNum(size_t N) {
+  const char *cs = "bcdfghjklmnpqrstvwxzy";
+  const char *vs = "iou";
+
+  size_t ncs = strlen(cs);
+  size_t nvs = strlen(vs);
+
+  char buf[1024];
+  char *out = buf;
+  int i = 0;
+  while (N > 0) {
+    const size_t icur = N % (ncs * nvs);
+    *out++ = cs[icur % ncs];
+    *out++ = vs[(icur / ncs) % nvs];
+    N /= ncs * nvs;
+    if (N > 0 && !(++i % 2)) {
+      *out++ = '-';
+    }
+  }
+  *out = 0;
+  return strdup(buf);
+};

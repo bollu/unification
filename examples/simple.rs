@@ -3,6 +3,10 @@ decl emptyList() -> List<a>;
 decl lengthList(List<a>) -> Int;
 decl emptyString() -> List<String>;
 
+decl ptr() -> Pointer<Pointer<Int>>;
+decl deref(Pointer<a>) -> a;
+
 lengthList(emptyString());
-lengthList(emptyList());
-product(emptyList(), emptyList());
+deref(deref(ptr()));
+
+

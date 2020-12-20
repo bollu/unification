@@ -13,6 +13,11 @@
 
 using namespace std;
 
+void printIndent(std::ostream &o, int indent) {
+    for (int i = 0; i < indent; ++i) {
+        o << "\t";
+    }
+}
 extern "C" {
 const char *__asan_default_options() { return "detect_leaks=0"; }
 }
@@ -112,7 +117,8 @@ struct TcTypeConstructor : public TcType {
     vector<TcType *> args;
     TcTypeConstructor(std::string name, vector<TcType *> args)
         : TcType(TcTypeKind::Constructor), name(name), args(args) {
-        assert(isupper(name[0]));
+        // lower is for type vars.
+        assert(!islower(name[0]));
     }
 
     void print(ostream &o) const override {
@@ -137,33 +143,176 @@ struct TcTypeConstructor : public TcType {
 int TcType::nuuid_ = 0;
 
 // A node in the type checker graph for unification.
-struct TcUnifNode {
-    bool isleaf() { return children_.size() == 0; }
-    bool isvar() { return islower(name_[0]); }
-    const int numChildren() { return children_.size(); }
+enum class UnifNodeKind { Var, Constructor };
+struct UnifNode {
+    UnifNodeKind kind;
+    const int uuid;
+    virtual void print(ostream &o, int indent = 0) const = 0;
+    UnifNode(UnifNodeKind kind) : kind(kind), uuid(nuuid_++), repr_(this) {}
 
-    static TcUnifNode gensymTypeVar() {
-        TcUnifNode ty;
-        ty.name_ = "gensym";
-        return ty;
-    };
+    UnifNode *repr() const {
+        if (this == this->repr_) {
+            return this->repr_;
+        }
+        this->repr_ = this->repr_->repr();
+        return this->repr_;
+    }
 
-    // replace all `forall x.` with new nodes.
-    static TcUnifNode fresh(TcType *t) {
-    };
-
-    const int uuid_;
+    // subsumes into the equivalence class of `parent`. parent will be the
+    // representative of the equivalence class this belongs to.
+    // Precondition: This node must be a representative.
+    void setEquivRepresentative(UnifNode *parent) {
+        assert(repr() == this);
+        this->repr_ = parent;
+    }
 
    private:
-    TcUnifNode() : uuid_(nuuid_ + 1) {}
+    mutable UnifNode *repr_;  // representative of equivalence class
     static int nuuid_;
-    vector<TcUnifNode *> children_;
-    std::string name_;
+};
+struct UnifNodeVar : public UnifNode {
+    UnifNodeVar() : UnifNode(UnifNodeKind::Var) {}
+    void print(ostream &o, int indent) const override {
 
-    static TcUnifNode *goFresh(TcType *t, map<std::string, TcUnifNode *> name2node) {}
+        if (this == repr()) {
+            o << "[α" << getPronouncableNum(uuid) << "]";
+        } else {
+            repr()->print(o, indent);
+        }
+    }
 };
 
-int TcUnifNode::nuuid_ = 0;
+struct UnifNodeConstructor : public UnifNode {
+    std::string name;
+    vector<UnifNode *> children;
+    UnifNodeConstructor(std::string name, vector<UnifNode *> children)
+        : UnifNode(UnifNodeKind::Constructor), name(name), children(children) {}
+
+    void print(ostream &o, int indent) const override {
+        if (this == repr()) {
+            o << "[" << name;
+            for (UnifNode *u : children) {
+                // o << "\n";
+                o << " ";
+                u->repr()->print(o, indent + 1);
+            }
+            o << "]";
+        } else {
+            repr()->print(o, indent);
+        }
+    }
+};
+
+int UnifNode::nuuid_ = 0;
+
+// go from types to unification graph.
+// don't take environments by reference, we want the scoping to be correct.
+UnifNode *freshGo_(TcType *ty, map<TcTypeFA *, UnifNodeVar *> m);
+UnifNode *fresh(TcType *ty) {
+    map<TcTypeFA *, UnifNodeVar *> m;
+    return freshGo_(ty, m);
+}
+
+// forall x. to the fresh node.
+UnifNode *freshGo_(TcType *ty, map<TcTypeFA *, UnifNodeVar *> m) {
+    if (auto fa = dynamic_cast<TcTypeFA *>(ty)) {
+        assert(m.find(fa) == m.end());
+        m[fa] = new UnifNodeVar();
+        return freshGo_(fa->inner, m);
+    }
+
+    if (TcTypeVar *v = dynamic_cast<TcTypeVar *>(ty)) {
+        auto it = m.find(v->fa);
+        assert(it != m.end() && "must have already seen forall for given var");
+        return it->second;
+    }
+
+    if (TcTypeConstructor *c = dynamic_cast<TcTypeConstructor *>(ty)) {
+        std::vector<UnifNode *> children;
+        for (TcType *arg : c->args) {
+            children.push_back(freshGo_(arg, m));
+        }
+        return new UnifNodeConstructor(c->name, children);
+    }
+
+    assert(false && "must have handled all Tc nodes!");
+};
+
+// unite the nodes `l` and `r` with `l` as the representative.
+void unify(UnifNode *l, UnifNode *r, int indent=0) {
+    printIndent(cerr, indent);
+    cerr << "\t-{u} ";
+    l->print(cerr);
+    cerr << "~";
+    r->print(cerr);
+    cerr << "\n";
+
+    auto printFinalAnswer = [&](std::string ty) {
+        printIndent(cerr, indent);
+        cerr << "\t-{v} ";
+        l->print(cerr);
+        cerr << "~";
+        r->print(cerr);
+        cerr << " | " << ty;
+        cerr << "\n";
+    };
+
+    l = l->repr();
+    r = r->repr();
+    if (l == r) {
+        printFinalAnswer("eq");
+        return;
+    }
+
+    if (UnifNodeVar *vl = dynamic_cast<UnifNodeVar *>(l)) {
+        vl->setEquivRepresentative(r);
+        printFinalAnswer("lvar");
+        return;
+    }
+
+    if (UnifNodeVar *vr = dynamic_cast<UnifNodeVar *>(r)) {
+        vr->setEquivRepresentative(l);
+        printFinalAnswer("rvar");
+        return;
+    }
+
+    UnifNodeConstructor *cl = dynamic_cast<UnifNodeConstructor *>(l);
+    assert(cl && "l must be constructor (now) or var (handled previously)");
+    UnifNodeConstructor *cr = dynamic_cast<UnifNodeConstructor *>(r);
+    assert(cr && "r must be constructor (now) or var (handled previously)");
+
+    // TODO: Why is this necessary? I don't understand.
+    cl->setEquivRepresentative(cr);
+
+    if (cl->name != cr->name) {
+        cerr << "\n===UNIFICATION ERROR===\n";
+        cerr << "mismatched constructors: l|" << cl->name << "| v/s r|"
+             << cr->name << "|\n";
+        cerr << "\nl: ";
+        cl->print(cerr, 0);
+        cerr << "\nr: ";
+        cl->print(cerr, 0);
+        cerr << "\n===\n";
+        exit(1);
+    }
+
+    if (cl->children.size() != cr->children.size()) {
+        cerr << "mismatched number of constructors: |" << cl->children.size()
+             << "| v/s |" << cr->children.size() << "|\n";
+        cerr << "\nl: ";
+        cl->print(cerr, 0);
+        cerr << "\nr: ";
+        cl->print(cerr, 0);
+        cerr << "\n===\n";
+        exit(1);
+    }
+
+    for (int i = 0; i < cl->children.size(); ++i) {
+        unify(cl->children[i], cr->children[i], indent+1);
+    }
+    printFinalAnswer("cons");
+    return;
+};
 
 // decl fnname(t1, t2, ... tn) -> tout
 struct FnDecl {
@@ -203,7 +352,7 @@ enum class ExprKind { Identifier, Ap };
 struct Expr {
     Span span;
     ExprKind kind;
-    TcUnifNode *type;
+    UnifNode *type = nullptr;
     Expr(Span span, ExprKind kind) : span(span), kind(kind){};
     virtual void print(std::ostream &o) const = 0;
 };
@@ -212,7 +361,14 @@ struct ExprIdent : public Expr {
     Identifier name;
     ExprIdent(Span span, Identifier name)
         : Expr(span, ExprKind::Identifier), name(name){};
-    void print(std::ostream &o) const override { o << name; }
+    void print(std::ostream &o) const override {
+        if (type) {
+            o << name;
+            type->repr()->print(o);
+        } else {
+            o << name;
+        }
+    }
 };
 
 struct ExprAp : public Expr {
@@ -237,6 +393,10 @@ struct ExprAp : public Expr {
             }
         }
         o << ")";
+        if (type) {
+            o << ":";
+            type->repr()->print(o);
+        }
     }
 };
 
@@ -424,9 +584,9 @@ TcType *generateTypeForDecl(const FnDecl *decl) {
     for (SurfaceType *ty : decl->argtys) {
         prodArgs.push_back(surfaceType2TcType(ty, var2fa));
     }
-    TcType *prod = new TcTypeConstructor("Prod", prodArgs);
+    TcType *prod = new TcTypeConstructor("π", prodArgs);
     TcType *ret = surfaceType2TcType(decl->retty, var2fa);
-    TcType *ap = new TcTypeConstructor("Ap", {prod, ret});
+    TcType *ap = new TcTypeConstructor("»", {prod, ret});
 
     TcType *prev = ap;
     for (auto it : var2fa) {
@@ -454,8 +614,41 @@ void typeInferExpr(Expr *e, Module &m, const char *raw_input) {
                                "ERROR when type checking expression");
             assert(false && "unknown identifier");
         }
-        assert(it->second->type && "types must have been computed for declarations before inference");
-        e->type = TcUnifNode::fresh(it->second->type);
+        assert(
+            it->second->type &&
+            "types must have been computed for declarations before inference");
+        cerr << "\t-{0} ";
+        e->print(cerr);
+        cerr << "\n";
+        e->type = fresh(it->second->type);
+        cerr << "\t-{1} ";
+        e->print(cerr);
+        cerr << "\n";
+        return;
+    }
+
+    if (ExprAp *ap = dynamic_cast<ExprAp *>(e)) {
+        typeInferExpr(ap->rator, m, raw_input);
+        vector<UnifNode *> argsty;
+        for (Expr *rand : ap->rands) {
+            typeInferExpr(rand, m, raw_input);
+            argsty.push_back(rand->type);
+        }
+
+        // rator(rands)
+        // t(ap) ~ Ap(Prod(map(t, rands), retty)
+        UnifNodeVar *retty = new UnifNodeVar();
+        UnifNode *apty = new UnifNodeConstructor(
+            "»", {new UnifNodeConstructor("π", argsty), retty});
+
+        ap->type = retty;
+        cerr << "\t-{0} ";
+        e->print(cerr);
+        cerr << "\n";
+        unify(apty, ap->rator->type);
+        cerr << "\t-{1} ";
+        e->print(cerr);
+        cerr << "\n";
     }
 }
 
@@ -480,7 +673,12 @@ int main(int argc, char *argv[]) {
     cerr << "\n";
 
     for (Expr *e : m.es) {
+        cerr << "\n==inferring |";
+        e->print(cerr);
+        cerr << "|==\n";
         typeInferExpr(e, m, raw_input);
+        // cerr << "  after inference:\n";
+        // e->print(cerr);
     }
 
     return 0;
