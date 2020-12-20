@@ -429,6 +429,12 @@ struct Parser {
         exit(1);
     }
 
+    void addNote(ParseError e) {
+        std::cerr << printfspan(e.span,  this->s.c_str(), e.errmsg.c_str());
+        std::cerr.flush();
+        return;
+    }
+
     void addErr(ParseError e) {
         std::cerr << printfspan(e.span,  this->s.c_str(), e.errmsg.c_str());
         std::cerr.flush();

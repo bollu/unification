@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <vector>
+#include <map>
 
 #include "parser.h"
 
@@ -53,12 +54,104 @@ struct SurfaceTypeConstructor : public SurfaceType {
     }
 };
 
+// a type definition, fully quantified and unique'd.
+enum class TcTypeKind { Forall, Constructor, Var };
+
+struct TcType {
+    TcTypeKind kind;
+    const int uuid;
+    virtual void print(ostream &o) const = 0;
+
+    TcType(TcTypeKind kind) : kind(kind), uuid(nuuid_++) {}
+
+   private:
+    static int nuuid_;
+};
+
+// forall x. <inner>
+struct TcTypeFA : public TcType {
+    std::string name;
+    TcType *inner;
+    TcTypeFA(std::string name, TcType *inner)
+        : TcType(TcTypeKind::Forall), name(name), inner(inner) {
+        assert(islower(name[0]));
+    };
+
+    void print(ostream &o) const override {
+        o << "(∀ " + getUniqName() + +".";
+        inner->print(o);
+        o << ")";
+    }
+
+    std::string getUniqName() const { return name + std::to_string(uuid); }
+};
+
+// <x>
+struct TcTypeVar : public TcType {
+    TcTypeFA *fa;  // pointer to the quantifier; de-bruijn-lite
+    TcTypeVar(TcTypeFA *fa) : TcType(TcTypeKind::Var), fa(fa){};
+    void print(ostream &o) const override { o << fa->getUniqName(); }
+};
+
+struct TcTypeConstructor : public TcType {
+    std::string name;
+    vector<TcType *> args;
+    TcTypeConstructor(std::string name, vector<TcType *> args)
+        : TcType(TcTypeKind::Constructor), name(name), args(args) {
+        assert(isupper(name[0]));
+    }
+
+    void print(ostream &o) const override {
+        o << getUniqName() << "<";
+        for (int i = 0; i < (int)args.size(); ++i) {
+            args[i]->print(o);
+            if (i + 1 < (int)args.size()) {
+                o << ", ";
+            }
+        }
+        o << ">";
+    }
+
+    std::string getUniqName() const {
+        return name + "-" + std::to_string(uuid);
+    }
+};
+
+int TcType::nuuid_ = 0;
+
+// A node in the type checker graph for unification.
+struct TcUnificationNode {
+    bool isleaf() { return children_.size() == 0; }
+    bool isvar() { return islower(name_[0]); }
+    const int numChildren() { return children_.size(); }
+
+    static TcUnificationNode gensymTypeVar() {
+        TcUnificationNode ty;
+        ty.name_ = "gensym";
+        return ty;
+    };
+
+    // static TcUnificationNode fresh(TcUnificationNode *t) {
+    // };
+
+    const int uuid_;
+
+   private:
+    TcUnificationNode() : uuid_(nuuid_ + 1) {}
+    static int nuuid_;
+    vector<TcUnificationNode *> children_;
+    std::string name_;
+};
+
+int TcUnificationNode::nuuid_ = 0;
+
 // decl fnname(t1, t2, ... tn) -> tout
 struct FnDecl {
     Span span;
     Identifier name;
     vector<SurfaceType *> argtys;
     SurfaceType *retty;
+    TcType *type = nullptr;
 
     FnDecl(Span span, Identifier name, vector<SurfaceType *> argtys,
            SurfaceType *retty)
@@ -74,9 +167,78 @@ struct FnDecl {
         }
         o << ") -> ";
         retty->print(o);
+
+        o << " : ";
+        if (type) {
+            type->print(o);
+        } else {
+            o << " [no type]";
+        }
         o << ";";
     }
 };
+
+// === Expressions === //
+enum class ExprKind { Identifier, Ap };
+struct Expr {
+    Span span;
+    ExprKind kind;
+    Expr(Span span, ExprKind kind) : span(span), kind(kind){};
+    virtual void print(std::ostream &o) const = 0;
+};
+
+struct ExprIdent : public Expr {
+    Identifier name;
+    ExprIdent(Span span, Identifier name)
+        : Expr(span, ExprKind::Identifier), name(name){};
+    void print(std::ostream &o) const override { o << name; }
+};
+
+struct ExprAp : public Expr {
+    Expr *rator;
+    vector<Expr *> rands;
+    ExprAp(Span span, Expr *rator, vector<Expr *> rands)
+        : Expr(span, ExprKind::Ap), rator(rator), rands(rands){};
+
+    void print(std::ostream &o) const override {
+        if (rator->kind == ExprKind::Identifier) {
+            rator->print(o);
+        } else {
+            o << "(";
+            rator->print(o);
+            o << ")";
+        }
+        o << "(";
+        for (int i = 0; i < (int)rands.size(); ++i) {
+            rands[i]->print(o);
+            if (i + 1 < (int)rands.size()) {
+                o << ", ";
+            }
+        }
+        o << ")";
+    }
+};
+
+// === MODULE ===
+
+struct Module {
+    std::map<std::string, FnDecl *> decls;
+    vector<Expr *> es;
+
+    void print(std::ostream &o) const {
+        for (auto it : decls) {
+            it.second->print(o);
+            o << "\n";
+        }
+
+        for (Expr *e : es) {
+            e->print(o);
+            o << ";\n";
+        }
+    }
+};
+
+// === PARSING ===
 
 SurfaceType *parseSurfaceType(Parser &p) {
     Identifier name = p.parseIdentifier();
@@ -137,48 +299,8 @@ FnDecl *parseFnDecl(Span spanBegin, Parser &p) {
                       retty);
 }
 
-enum class ExprKind { Identifier, Ap };
-struct Expr {
-    Span span;
-    ExprKind kind;
-    Expr(Span span, ExprKind kind) : span(span), kind(kind){};
-    virtual void print(std::ostream &o) const = 0;
-};
-
-struct ExprIdent : public Expr {
-    Identifier name;
-    ExprIdent(Span span, Identifier name)
-        : Expr(span, ExprKind::Identifier), name(name){};
-    void print(std::ostream &o) const override { o << name; }
-};
-
-struct ExprAp : public Expr {
-    Expr *rator;
-    vector<Expr *> rands;
-    ExprAp(Span span, Expr *rator, vector<Expr *> rands)
-        : Expr(span, ExprKind::Ap), rator(rator), rands(rands){};
-
-    void print(std::ostream &o) const override {
-        if (rator->kind == ExprKind::Identifier) {
-            rator->print(o);
-        } else {
-            o << "(";
-            rator->print(o);
-            o << ")";
-        }
-        o << "(";
-        for (int i = 0; i < (int)rands.size(); ++i) {
-            rands[i]->print(o);
-            if (i + 1 < (int)rands.size()) {
-                o << ", ";
-            }
-        }
-        o << ")";
-    }
-};
-
 // expr := apRator apRands
-// apRator := '(' expr ')' | ident 
+// apRator := '(' expr ')' | ident
 // apRands := '(' expr ',' expr ... ',' expr ')'
 Expr *parseExpr(Parser &p);
 Expr *parseApRator(Parser &p);
@@ -194,23 +316,23 @@ Expr *parseApRator(Parser &p) {
     return new ExprIdent(name.span, name);
 }
 
-vector<Expr*> parseApRands(Parser &p) {
+vector<Expr *> parseApRands(Parser &p) {
     Span open = p.parseOpenRoundBracket();
     if (p.parseOptionalCloseRoundBracket()) {
         return {};
     }
 
     vector<Expr *> rhs;
-    while(1) {
+    while (1) {
         rhs.push_back(parseExpr(p));
-        if (p.parseOptionalComma()) { continue; }
-        else { 
+        if (p.parseOptionalComma()) {
+            continue;
+        } else {
             p.parseCloseRoundBracket(open);
             break;
         }
     }
     return rhs;
-
 }
 Expr *parseExpr(Parser &p) {
     Loc begin = p.getCurrentLoc();
@@ -220,28 +342,19 @@ Expr *parseExpr(Parser &p) {
     return new ExprAp(Span(begin, end), rator, rands);
 }
 
-struct Module {
-    vector<FnDecl *> decls;
-    vector<Expr *> es;
-
-    void print(std::ostream &o) const {
-        for (FnDecl *decl : decls) {
-            decl->print(o);
-            o << "\n";
-        }
-
-        for (Expr *e : es) {
-            e->print(o);
-            o << ";\n";
-        }
-    }
-};
-
 Module parseTopLevel(Parser &p) {
     Module m;
     while (!p.eof()) {
         if (optional<Span> sp = p.parseOptionalKeyword("decl")) {
-            m.decls.push_back(parseFnDecl(*sp, p));
+            FnDecl *decl = parseFnDecl(*sp, p);
+            auto it = m.decls.find(decl->name.name);
+            if (it != m.decls.end()) {
+                cerr << "\n===ERROR: multiple declaration of name |" << decl->name.name << "|==\n";
+                p.addNote(ParseError(it->second->span, "original 1st declaration"));
+                p.addErr(ParseError(decl->span, "illegal 2nd declaration"));
+            } else {
+                m.decls[decl->name.name] = decl;
+            }
             continue;
         } else {
             m.es.push_back(parseExpr(p));
@@ -252,6 +365,10 @@ Module parseTopLevel(Parser &p) {
                             "expected toplevel 'decl' or 'use'"));
     }
     return m;
+}
+
+
+void generateTypeDeclarations(Module &m) {
 }
 
 const int BUFSIZE = int(1e9);
@@ -268,6 +385,12 @@ int main(int argc, char *argv[]) {
     cerr << "\n===parsed module===\n";
     m.print(cerr);
     cerr << "\n";
+
+    generateTypeDeclarations(m);
+    cerr << "\n===module w/ typed decls===\n";
+    m.print(cerr);
+    cerr << "\n";
+
     return 0;
 }
 
