@@ -6,6 +6,7 @@
 
 #include <vector>
 #include <map>
+#include <set>
 
 #include "parser.h"
 
@@ -22,6 +23,8 @@ struct SurfaceType {
     SurfaceTypeKind kind;
     SurfaceType(Span span, SurfaceTypeKind kind) : span(span), kind(kind){};
     virtual void print(std::ostream &o) const = 0;
+    // collect the names of variables that occur in this type.
+    virtual void collectVarNames(std::set<std::string> &vs) const = 0;
 };
 
 struct SurfaceTypeVar : public SurfaceType {
@@ -29,6 +32,10 @@ struct SurfaceTypeVar : public SurfaceType {
     SurfaceTypeVar(Span span, Identifier name)
         : SurfaceType(span, SurfaceTypeKind::Var), name(name){};
     void print(std::ostream &o) const override { o << name.name; }
+
+    void collectVarNames(std::set<std::string> &vs) const override {
+        vs.insert(name.name);
+    }
 };
 
 struct SurfaceTypeConstructor : public SurfaceType {
@@ -51,6 +58,12 @@ struct SurfaceTypeConstructor : public SurfaceType {
             }
         }
         o << ">";
+    }
+
+    void collectVarNames(std::set<std::string> &vs) const override {
+        for(SurfaceType *arg : args) {
+            arg->collectVarNames(vs);
+        }
     }
 };
 
@@ -78,7 +91,7 @@ struct TcTypeFA : public TcType {
     };
 
     void print(ostream &o) const override {
-        o << "(∀ " + getUniqName() + +".";
+        o << "(∀ " + getUniqName()  + ". ";
         inner->print(o);
         o << ")";
     }
@@ -102,7 +115,10 @@ struct TcTypeConstructor : public TcType {
     }
 
     void print(ostream &o) const override {
-        o << getUniqName() << "<";
+        o << getUniqName();
+
+        if (args.size() == 0) { return; }
+        o << "<";
         for (int i = 0; i < (int)args.size(); ++i) {
             args[i]->print(o);
             if (i + 1 < (int)args.size()) {
@@ -113,7 +129,7 @@ struct TcTypeConstructor : public TcType {
     }
 
     std::string getUniqName() const {
-        return name + "-" + std::to_string(uuid);
+        return name + std::to_string(uuid);
     }
 };
 
@@ -368,7 +384,55 @@ Module parseTopLevel(Parser &p) {
 }
 
 
-void generateTypeDeclarations(Module &m) {
+TcType *surfaceType2TcType(SurfaceType *st, std::map<std::string, TcTypeFA *> &vars) {
+    if (SurfaceTypeVar *v = dynamic_cast<SurfaceTypeVar *>(st)) {
+        assert(vars.count(v->name.name));
+        return new TcTypeVar(vars[v->name.name]);
+    } 
+
+    if (SurfaceTypeConstructor *c = dynamic_cast<SurfaceTypeConstructor *>(st)) {
+        std::vector<TcType *> args;
+        for(SurfaceType *arg : c->args) {
+            args.push_back(surfaceType2TcType(arg, vars));
+        }
+        return new TcTypeConstructor(c->name.name, args);
+    }
+
+    assert(false && "surface type must be variable or constructor.");
+}
+
+TcType *generateTypeForDecl(const FnDecl *decl) {
+    std::set<std::string> vs;
+    for(SurfaceType *ty : decl->argtys) {
+        ty->collectVarNames(vs);
+    }
+    decl->retty->collectVarNames(vs);
+    std::map<std::string, TcTypeFA *> var2fa;
+    for(std::string name : vs) {
+        var2fa[name] =  new TcTypeFA(name, nullptr);
+    }
+    // generate type Ap(Prod(t1, t2, ... tn), ret)
+    vector<TcType *> prodArgs;
+    for(SurfaceType *ty : decl->argtys) {
+        prodArgs.push_back(surfaceType2TcType(ty, var2fa));
+    }
+    TcType *prod = new TcTypeConstructor("Prod", prodArgs);
+    TcType *ret = surfaceType2TcType(decl->retty, var2fa);
+    TcType *ap = new TcTypeConstructor("Ap", {prod, ret});
+
+    TcType *prev = ap;
+    for(auto it : var2fa) {
+        it.second->inner = prev;
+        prev = it.second;
+    }
+
+    return prev;
+};
+
+void generateTypesForDecls(Module &m) {
+    for(auto it : m.decls) {
+        it.second->type = generateTypeForDecl(it.second);
+    }
 }
 
 const int BUFSIZE = int(1e9);
@@ -386,7 +450,7 @@ int main(int argc, char *argv[]) {
     m.print(cerr);
     cerr << "\n";
 
-    generateTypeDeclarations(m);
+    generateTypesForDecls(m);
     cerr << "\n===module w/ typed decls===\n";
     m.print(cerr);
     cerr << "\n";
