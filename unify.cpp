@@ -22,7 +22,7 @@ extern "C" {
 const char *__asan_default_options() { return "detect_leaks=0"; }
 }
 
-enum class SurfaceTypeKind { Var, Constructor };
+enum class SurfaceTypeKind { Var, Constructor, Fn };
 // Name<Arg1, Arg2, ..., Argn> | Name
 struct SurfaceType {
     Span span;
@@ -41,6 +41,23 @@ struct SurfaceTypeVar : public SurfaceType {
 
     void collectVarNames(std::set<std::string> &vs) const override {
         vs.insert(name.name);
+    }
+};
+
+struct SurfaceTypeFn : public SurfaceType {
+    SurfaceType *l, *r;
+
+    SurfaceTypeFn(Span span, SurfaceType *l, SurfaceType *r)
+        : SurfaceType(span, SurfaceTypeKind::Fn), l(l), r(r) {}
+    void print(std::ostream &o) const override {
+        l->print(o);
+        o << " -> ";
+        r->print(o);
+    };
+
+    void collectVarNames(std::set<std::string> &vs) const override {
+        l->collectVarNames(vs);
+        r->collectVarNames(vs);
     }
 };
 
@@ -125,7 +142,8 @@ struct TcTypeConstructor : public TcType {
         o << name;
 
         for (int i = 0; i < (int)args.size(); ++i) {
-            o << " "; args[i]->print(o);
+            o << " ";
+            args[i]->print(o);
         }
         o << ">";
     }
@@ -412,9 +430,29 @@ struct Module {
 
 // === PARSING ===
 
+// a -> b -> c = a -> (b -> c)
+// SurfaceType := SurfaceTypeTerm '->' SurfaceType | SurfaceType
+// SurfaceTypeTerm := Ident<SurfaceType, SurfaceType, ..., SurfaceType> |
+//                Ident | "(" SurfaceType ")"
+SurfaceType *parseSurfaceTypeTerm(Parser &p);
 SurfaceType *parseSurfaceType(Parser &p) {
-    Identifier name = p.parseIdentifier();
+    SurfaceType *a = parseSurfaceTypeTerm(p);
+    if (p.parseOptionalSigil("->")) {
+        SurfaceType *b = parseSurfaceType(p);
+        return new SurfaceTypeFn(a->span.extendRight(b->span), a, b);
+    } else {
+        return a;
+    }
+};
 
+SurfaceType *parseSurfaceTypeTerm(Parser &p) {
+    if (std::optional<Span> open = p.parseOptionalOpenRoundBracket()) {
+        SurfaceType *t = parseSurfaceType(p);
+        p.parseCloseRoundBracket(*open);
+        return t;
+    }
+    // not an oeb brace
+    Identifier name = p.parseIdentifier();
     if (!isupper(name.name[0]) && !islower(name.name[0])) {
         p.addErr(ParseError(name.span,
                             "expected type name to start with character"));
@@ -493,11 +531,12 @@ Expr *parseExpr(Parser &p) {
     Expr *rator = parseApRator(p);
 
     optional<Span> open = p.parseOptionalOpenRoundBracket();
-    if (!open) { return rator; }
+    if (!open) {
+        return rator;
+    }
 
     vector<Expr *> rands;
     if (!p.parseOptionalCloseRoundBracket()) {
-
         while (1) {
             rands.push_back(parseExpr(p));
             if (p.parseOptionalComma()) {
@@ -556,7 +595,12 @@ TcType *surfaceType2TcType(SurfaceType *st,
         return new TcTypeConstructor(c->name.name, args);
     }
 
-    assert(false && "surface type must be variable or constructor.");
+    if (SurfaceTypeFn *fn = dynamic_cast<SurfaceTypeFn *>(st)) {
+        return new TcTypeConstructor("→", {surfaceType2TcType(fn->l, vars),
+                                           surfaceType2TcType(fn->r, vars)});
+    }
+
+    assert(false && "surface type must be variable, constructor, or function");
 }
 
 TcType *generateTypeForDecl(const FnDecl *decl) {
@@ -569,14 +613,14 @@ TcType *generateTypeForDecl(const FnDecl *decl) {
     for (std::string name : vs) {
         var2fa[name] = new TcTypeFA(name, nullptr);
     }
-    // generate type Ap(Prod(t1, t2, ... tn), ret)
+    // generate type Ap(t1, ret) if n == 1
     vector<TcType *> prodArgs;
     for (SurfaceType *ty : decl->argtys) {
         prodArgs.push_back(surfaceType2TcType(ty, var2fa));
     }
-    TcType *prod = new TcTypeConstructor("π", prodArgs);
+    TcType *domain = new TcTypeConstructor("π", prodArgs);
     TcType *ret = surfaceType2TcType(decl->retty, var2fa);
-    TcType *ap = new TcTypeConstructor("→", {prod, ret});
+    TcType *ap = new TcTypeConstructor("→", {domain, ret});
 
     TcType *prev = ap;
     for (auto it : var2fa) {
