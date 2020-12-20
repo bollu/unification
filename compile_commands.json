@@ -1,0 +1,7 @@
+[
+{
+"directory": "/home/bollu/work/unification",
+"command": "/usr/bin/clang++-10  -std=c++17 -fsanitize=address -fsanitize=undefined -Wall -Werror /home/bollu/work/unification/unify.cpp -o /home/bollu/work/unification/unify",
+"file": "/home/bollu/work/unification/unify.cpp"
+}
+]
